@@ -269,44 +269,60 @@ class NavigationController:
 
         self.is_navigating = True
         rospy.loginfo("开始导航流程")
-
-        # 1. 二维码检测准备
-        rospy.loginfo("准备二维码检测...")
-        self.waiting_for_tag = True
-        self.tag_id = None
-
-        # 2. 移动到检测位置
-        quat = tf_trans.quaternion_from_euler(0, 0, -math.pi / 2)  # 90
-        detection_point = [0.65, -0.03, 0, quat[0], quat[1], quat[2], quat[3]]
-        self.navigate_to_point(detection_point, 0, 1)
-
-        # 3. 等待二维码检测 (最多5秒)
-        timeout = 5.0
-        start_time = rospy.Time.now().to_sec()
-        while (rospy.Time.now().to_sec() - start_time < timeout and
-               self.waiting_for_tag and not rospy.is_shutdown()):
-            rospy.sleep(0.1)
-
-        # 4. 根据检测结果选择路径
+        # 如果按下 'g'，优先前往 (1.9, 1.87)，跳过起点二维码检测
         xml_file = ""
-        if self.tag_id == 1:
+        if getattr(self, 'key', None) == "g":
             xml_file = "/home/bcsh/waypoints5_1.xml"
-        elif self.tag_id == 3:
-            xml_file = "/home/bcsh/waypoints5_3.xml"
+            try:
+                init_quat = tf_trans.quaternion_from_euler(0, 0, 0)
+                init_point = [1.9, 1.87, 0, init_quat[0], init_quat[1], init_quat[2], init_quat[3]]
+                rospy.loginfo("按下'g'，跳过检测，先前往 (1.9, 1.87)")
+                self.navigate_to_point(init_point, 0, 1)
+                rospy.sleep(0.05)
+            except Exception as e:
+                rospy.logwarn("前往初始化点失败: %s", str(e))
         else:
-            rospy.logwarn("二维码检测超时或无效，使用默认路径")
-            xml_file = "/home/bcsh/waypoints1.xml"  # 默认路径
+            # 1. 二维码检测准备
+            rospy.loginfo("准备二维码检测...")
+            self.waiting_for_tag = True
+            self.tag_id = None
+
+            # 2. 移动到检测位置
+            quat = tf_trans.quaternion_from_euler(0, 0, -math.pi / 2)  # 90
+            detection_point = [0.65, -0.03, 0, quat[0], quat[1], quat[2], quat[3]]
+            self.navigate_to_point(detection_point, 0, 1)
+
+            # 3. 等待二维码检测 (最多5秒)
+            timeout = 5.0
+            start_time = rospy.Time.now().to_sec()
+            while (rospy.Time.now().to_sec() - start_time < timeout and
+                   self.waiting_for_tag and not rospy.is_shutdown()):
+                rospy.sleep(0.1)
+
+            # 4. 根据检测结果选择路径
+            if self.tag_id == 1:
+                xml_file = "/home/bcsh/waypoints5_1.xml"
+            elif self.tag_id == 3:
+                xml_file = "/home/bcsh/waypoints5_3.xml"
+            else:
+                rospy.logwarn("二维码检测超时或无效，使用默认路径")
+                xml_file = "/home/bcsh/waypoints1.xml"
 
         # 5. 解析并执行路径
         points = self.parse_xml(xml_file)
         if points:
-            self.navigate_points(points, self.tag_id)
+            try:
+                self.navigate_points(points, getattr(self, 'tag_id', 1))
+            except Exception as e:
+                rospy.logwarn("执行导航时出错: %s", str(e))
         else:
             rospy.logwarn("导航点列表为空")
 
-        # 返回起始位置
-        back_quat = tf_trans.quaternion_from_euler(0, 0, math.pi)
-        self.navigate_to_point(points[3], 0, 1)
+        # 返回起始位置（如果存在）
+        if points and len(points) > 3:
+            back_quat = tf_trans.quaternion_from_euler(0, 0, math.pi)
+            self.navigate_to_point(points[3], 0, 1)
+
         self.is_navigating = False
         rospy.loginfo("导航流程完成!")
 
