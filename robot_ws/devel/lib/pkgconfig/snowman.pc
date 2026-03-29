@@ -1,0 +1,8 @@
+prefix=/home/bcsh/robot_ws/devel
+
+Name: snowman
+Description: Description of snowman
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

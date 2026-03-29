@@ -1,0 +1,5 @@
+<launch>
+    <node pkg="match_mini" type="auto_slam.py" respawn="false" name="auto_slam_node" output="screen">
+    </node>
+</launch>
+

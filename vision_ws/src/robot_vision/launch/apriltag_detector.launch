@@ -1,0 +1,4 @@
+<launch>
+  <node name="apriltag_detector" type="apriltag_detector.py" pkg="robot_vision" >
+  </node>
+</launch>

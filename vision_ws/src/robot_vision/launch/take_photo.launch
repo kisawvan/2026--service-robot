@@ -1,0 +1,5 @@
+<launch>
+  <node name="take_photo" type="take_photo.py" pkg="robot_vision" output="screen">
+    <param name="person_name" value="A"/>
+  </node>
+</launch>

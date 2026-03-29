@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+
+import rospy
+import cv2
+import numpy as np
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge, CvBridgeError
+
+class GreenObjectDetector:
+    def __init__(self):
+        # 参数
+        camera_topic = rospy.get_param('~camera_topic', '/camera/color/image_raw')
+        self.area_threshold = rospy.get_param('~area_threshold', 100)
+        self.confidence_threshold = rospy.get_param('~confidence_threshold', 10)
+        self.max_frames_for_learning = rospy.get_param('~max_frames_for_learning', 30)
+
+        self.bridge = CvBridge()
+        self.image_sub = rospy.Subscriber(camera_topic, Image, self.image_callback)
+
+        self.frame_count = 0
+        self.learning_phase = True
+
+        # 学习阶段存储每帧的检测结果（用于最后确定顺序）
+        self.detections_history = []  # 每帧: [(cx, cy, area, contour), ...]
+
+        # 学习结束后确定的稳定信息
+        self.left_to_right_ids = None      # e.g., [1, 3, 2] 表示从左到右是1号、3号、2号
+        self.id_area_mean = {}             # {1: mean_area, 2: ..., 3: ...}
+        self.total_stable_ids = 0
+
+        rospy.loginfo(f"Subscribing to: {camera_topic}")
+        rospy.loginfo(f"Learning: first {self.max_frames_for_learning} frames")
+        rospy.loginfo("Will lock left-to-right ID order after learning.")
+
+    def image_callback(self, msg):
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        except CvBridgeError as e:
+            rospy.logerr(f"CvBridge Error: {e}")
+            return
+
+        hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
+        lower_green = np.array([37, 57, 62])
+        upper_green = np.array([85, 125, 125])
+        mask = cv2.inRange(hsv, lower_green, upper_green)
+
+        kernel = np.ones((5, 5), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        valid_contours = [c for c in contours if cv2.contourArea(c) >= self.area_threshold]
+
+        labeled_img = cv_image.copy()
+
+        if self.learning_phase:
+            # 每帧按面积从小到大排序（1=最小）
+            valid_contours.sort(key=cv2.contourArea)
+            top3 = valid_contours[:3]
+
+            current_frame = []
+            for rank, cnt in enumerate(top3):
+                area = cv2.contourArea(cnt)
+                M = cv2.moments(cnt)
+                if M["m00"] == 0:
+                    continue
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+                current_frame.append((cx, cy, area, cnt, rank + 1))  # rank+1: 1,2,3
+
+                # 显示当前排名
+                cv2.drawContours(labeled_img, [cnt], -1, (255, 0, 0), 2)
+                cv2.putText(labeled_img, str(rank + 1), (cx - 10, cy + 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2, cv2.LINE_AA)
+
+            self.detections_history.append(current_frame)
+            self.frame_count += 1
+
+            if self.frame_count >= self.max_frames_for_learning:
+                self._finalize_stable_order()
+                self.learning_phase = False
+                rospy.loginfo(f"Learning done. Left-to-right ID order: {self.left_to_right_ids}")
+
+        else:
+            # === 非学习阶段：使用固定左右顺序模板 ===
+            detected = []
+            for cnt in valid_contours:
+                area = cv2.contourArea(cnt)
+                M = cv2.moments(cnt)
+                if M["m00"] == 0:
+                    continue
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+                detected.append({"cx": cx, "cy": cy, "area": area, "contour": cnt})
+
+            if not detected:
+                # 无检测，直接显示原图
+                cv2.imshow("Green Object Detector (Fixed Order)", labeled_img)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    rospy.signal_shutdown("User pressed 'q'.")
+                return
+
+            # 按 x 坐标从左到右排序
+            detected.sort(key=lambda x: x["cx"])
+            current_x_order = detected  # 从左到右的检测列表
+
+            # 获取模板（从左到右的ID序列）
+            template_ids = self.left_to_right_ids  # e.g., [1, 3, 2]
+            n_template = len(template_ids)
+            n_current = len(current_x_order)
+
+            # 策略：尝试将当前检测对齐到模板的连续子序列
+            # 由于最多3个，我们可以枚举所有可能的缺失情况
+            assigned_ids = {}
+
+            if n_current == n_template:
+                # 全部可见：直接一一对应
+                for i in range(n_current):
+                    assigned_ids[i] = template_ids[i]
+            elif n_current == 2 and n_template == 3:
+                # 缺失一个：判断缺失位置
+                # 假设模板 [A, B, C] (left to right)
+                # 情况1: 缺A → 观测 [B, C] → x间距较小（B-C近，A-B远）
+                # 情况2: 缺B → 观测 [A, C] → x间距大
+                # 情况3: 缺C → 观测 [A, B] → x间距较小
+                x0, x1 = current_x_order[0]["cx"], current_x_order[1]["cx"]
+                total_span = x1 - x0
+                # 估算完整跨度（用学习阶段最后帧的宽度）
+                # 简化：若 total_span > 某阈值 → 缺中间
+                if total_span > 150:  # 可调，单位像素
+                    # 缺中间
+                    assigned_ids[0] = template_ids[0]  # left = A
+                    assigned_ids[1] = template_ids[2]  # right = C
+                else:
+                    # 检查是否缺左边或右边：看 x0 是否太靠右 或 x1 太靠左
+                    img_center = labeled_img.shape[1] // 2
+                    if x0 > img_center:
+                        # 两个都在右边 → 缺左边
+                        assigned_ids[0] = template_ids[1]
+                        assigned_ids[1] = template_ids[2]
+                    elif x1 < img_center:
+                        # 两个都在左边 → 缺右边
+                        assigned_ids[0] = template_ids[0]
+                        assigned_ids[1] = template_ids[1]
+                    else:
+                        # 默认缺右边（保守）
+                        assigned_ids[0] = template_ids[0]
+                        assigned_ids[1] = template_ids[1]
+            elif n_current == 1 and n_template == 3:
+                # 只看到一个：用面积 + 位置粗略判断
+                obj = current_x_order[0]
+                best_id = None
+                min_diff = float('inf')
+                for tid in template_ids:
+                    if tid in self.id_area_mean:
+                        mean_area = self.id_area_mean[tid]
+                        diff = abs(obj["area"] - mean_area) / mean_area
+                        if diff < min_diff:
+                            min_diff = diff
+                            best_id = tid
+                if best_id is not None and min_diff < 0.6:
+                    assigned_ids[0] = best_id
+                else:
+                    # 无法确定，不标ID（或标?）
+                    best_id = None
+            else:
+                # 其他情况（如模板只有2个）
+                for i in range(min(n_current, n_template)):
+                    assigned_ids[i] = template_ids[i]
+
+            # 绘制结果
+            for idx in range(n_current):
+                if idx in assigned_ids:
+                    obj = current_x_order[idx]
+                    fixed_id = assigned_ids[idx]
+                    cv2.drawContours(labeled_img, [obj["contour"]], -1, (0, 255, 0), 2)
+                    cv2.putText(labeled_img, str(fixed_id), (obj["cx"] - 10, obj["cy"] + 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2, cv2.LINE_AA)
+
+        cv2.imshow("Green Object Detector (Fixed Order)", labeled_img)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            rospy.signal_shutdown("User pressed 'q'.")
+
+    def _finalize_stable_order(self):
+        """确定从左到右的固定ID顺序"""
+        if not self.detections_history:
+            return
+
+        # 使用最后一帧（最稳定）来确定左右顺序
+        last_frame = self.detections_history[-1]
+        if not last_frame:
+            return
+
+        # 按 x 坐标排序（从左到右）
+        last_frame.sort(key=lambda x: x[0])  # x[0] = cx
+        self.left_to_right_ids = [rank for (_, _, _, _, rank) in last_frame]
+        self.total_stable_ids = len(self.left_to_right_ids)
+
+        # 同时计算每个ID的平均面积（用于单目标识别）
+        area_sum = {1: 0, 2: 0, 3: 0}
+        area_count = {1: 0, 2: 0, 3: 0}
+
+        for frame in self.detections_history:
+            for (cx, cy, area, cnt, rank) in frame:
+                area_sum[rank] += area
+                area_count[rank] += 1
+
+        for rank in [1, 2, 3]:
+            if area_count[rank] >= self.confidence_threshold:
+                self.id_area_mean[rank] = area_sum[rank] / area_count[rank]
+            else:
+                self.id_area_mean[rank] = None
+
+        rospy.loginfo(f"Final left-to-right ID order: {self.left_to_right_ids}")
+        for rid in self.left_to_right_ids:
+            if rid in self.id_area_mean and self.id_area_mean[rid]:
+                rospy.loginfo(f"ID {rid} mean area: {self.id_area_mean[rid]:.1f}")
+
+    def shutdown_hook(self):
+        cv2.destroyAllWindows()
+
+
+if __name__ == '__main__':
+    rospy.init_node('green_object_detector', anonymous=True)
+    detector = GreenObjectDetector()
+    rospy.on_shutdown(detector.shutdown_hook)
+    rospy.spin()

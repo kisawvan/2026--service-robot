@@ -1,0 +1,4 @@
+<launch>
+    <node pkg="robot_vision" name="red_ball_detector" type="red_ball_detector.py" output="screen">
+    </node>
+</launch>

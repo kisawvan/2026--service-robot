@@ -1,0 +1,8 @@
+prefix=/home/bcsh/robot_ws/devel
+
+Name: match_mini
+Description: Description of match_mini
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

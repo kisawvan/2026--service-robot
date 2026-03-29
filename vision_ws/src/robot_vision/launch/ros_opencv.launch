@@ -1,0 +1,4 @@
+<launch>
+    <node pkg="robot_vision" name="ros_opencv" type="ros_opencv.py" output="screen">
+    </node>
+</launch>

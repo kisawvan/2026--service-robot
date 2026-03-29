@@ -1,0 +1,4 @@
+<launch>
+    <node pkg="match_mini" type="nav_result_callback" respawn="false" name="nav_result" output="screen">
+    </node>
+</launch>

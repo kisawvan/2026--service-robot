@@ -1,0 +1,8 @@
+prefix=/home/bcsh/robot_ws/install
+
+Name: learn_communication
+Description: Description of learn_communication
+Version: 0.0.0
+Cflags: -I${prefix}/include
+Libs: -L${prefix}/lib 
+Requires: roscpp rospy std_msgs message_runtime

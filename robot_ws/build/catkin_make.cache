@@ -1,0 +1,2 @@
+learn_communication:match_mini:robot_base/zoo_bringup:robot_base/zoo_control:robot_base/zoo_description:robot_base/zoo_imu:robot_base/zoo_robot:robot_slam:rplidar_ros:snowman:waterplus_map_tools:wpb_home_tutorials
+-DCATKIN_DEVEL_PREFIX=/home/bcsh/robot_ws/devel -DCMAKE_INSTALL_PREFIX=/home/bcsh/robot_ws/install -G Unix Makefiles

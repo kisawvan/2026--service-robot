@@ -1,0 +1,4 @@
+<launch>
+  <node name="mini4_talk" type="mini4_talk.py" pkg="snowman" output="screen">
+  </node>
+</launch>

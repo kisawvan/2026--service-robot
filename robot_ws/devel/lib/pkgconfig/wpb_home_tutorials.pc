@@ -1,0 +1,8 @@
+prefix=/home/bcsh/robot_ws/devel
+
+Name: wpb_home_tutorials
+Description: Description of wpb_home_tutorials
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

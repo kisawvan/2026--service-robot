@@ -1,0 +1,4 @@
+<launch>
+  <node name="face_rec" type="face_recognize.py" pkg="robot_vision" output="screen" >
+  </node>
+</launch>
