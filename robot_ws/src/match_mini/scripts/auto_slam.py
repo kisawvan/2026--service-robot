@@ -64,7 +64,7 @@ class NavigationController:
     def key_callback(self, msg):
         """处理按键信息回调"""
         self.key = msg.data  # 这里进行赋值
-
+    "位置导航文件"
     def parse_xml(self, xml_file):
         """解析XML导航文件"""
         try:
