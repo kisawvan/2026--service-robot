@@ -376,12 +376,95 @@ class NavigationController:
             rospy.loginfo("AprilTag 识别完成，tag_id=%s", str(self.tag_id))
             rospy.loginfo("AprilTag 原始消息：%s", str(self.last_tag_msg))
 
-            # 根据识别结果（如果有）继续后续航点或按既定逻辑执行
-            next_tag = self.tag_id if self.tag_id is not None else 1
+            # 打印当前路径点1和路径点2坐标（如果存在）
             try:
-                self.navigate_points(points, next_tag)
+                if len(points) >= 2:
+                    rospy.loginfo("路径点1 坐标: x=%.3f, y=%.3f", points[0][0], points[0][1])
+                    rospy.loginfo("路径点2 坐标: x=%.3f, y=%.3f", points[1][0], points[1][1])
+                else:
+                    rospy.logwarn("路径点数量不足，无法打印路径点1/2坐标")
             except Exception as e:
-                rospy.logwarn("继续导航时出错: %s", str(e))
+                rospy.logwarn("打印路径点坐标出错: %s", str(e))
+
+            # 根据识别结果决定执行顺序：
+            # tag==1 -> 先执行 points[0] 的弓字形，再执行 points[2] 的弓字形
+            # tag==3 -> 先执行 points[2] 的弓字形，再执行 points[0] 的弓字形
+            try:
+                tag = self.tag_id if self.tag_id is not None else 1
+                # 需要至少 3 个路径点来执行点1和点3
+                if len(points) < 3:
+                    rospy.logwarn("导航点数量不足（%d），无法按要求执行点1/点3的弓字形", len(points))
+                else:
+                    if tag == 1:
+                        rospy.loginfo("Tag==1: 先执行路径点1的弓字形，再执行路径点3的弓字形")
+                        self.navigate_to_point(points[0], 1, len(points))
+                        rospy.sleep(0.05)
+                        self.execute_special_path(points[0][0], points[0][1], 1)
+                        rospy.sleep(0.05)
+
+                        self.navigate_to_point(points[2], 2, len(points))
+                        rospy.sleep(0.05)
+                        self.execute_special_path(points[2][0], points[2][1], 2)
+                        rospy.sleep(0.05)
+
+                    elif tag == 3:
+                        rospy.loginfo("Tag==3: 先执行路径点3的弓字形，再执行路径点1的弓字形")
+                        self.navigate_to_point(points[2], 1, len(points))
+                        rospy.sleep(0.05)
+                        self.execute_special_path(points[2][0], points[2][1], 1)
+                        rospy.sleep(0.05)
+
+                        self.navigate_to_point(points[0], 2, len(points))
+                        rospy.sleep(0.05)
+                        self.execute_special_path(points[0][0], points[0][1], 1)
+                        rospy.sleep(0.05)
+
+                    else:
+                        rospy.loginfo("未识别到指定 Tag（%s），使用默认导航逻辑", str(tag))
+                        self.navigate_points(points, tag)
+
+                # 完成后：优先返回路径点4(points[3])并在该点停止；若不存在则返回原点 (0,0)
+                try:
+                    if len(points) > 3:
+                        rospy.loginfo("任务完成，返回路径点4 并在该点停止运行")
+                        return_point = points[3]
+                        success = self.navigate_to_point(return_point, 0, 1)
+                        if success:
+                            try:
+                                self.cmd_vel_pub.publish(Twist())
+                            except Exception as e:
+                                rospy.logwarn("停止机器人时出错: %s", str(e))
+                            self.is_navigating = False
+                            rospy.loginfo("已到达路径点4并停止运行")
+                            return
+                        else:
+                            rospy.logwarn("到达路径点4失败，尝试停止并结束流程")
+                            try:
+                                self.cmd_vel_pub.publish(Twist())
+                            except Exception:
+                                pass
+                            self.is_navigating = False
+                            return
+                    else:
+                        origin_quat = tf_trans.quaternion_from_euler(0, 0, 0)
+                        origin_point = [0.0, 0.0, 0.0, origin_quat[0], origin_quat[1], origin_quat[2], origin_quat[3]]
+                        rospy.loginfo("任务完成，路径点4不存在，返回起点 (0,0)")
+                        success = self.navigate_to_point(origin_point, 0, 1)
+                        if success:
+                            try:
+                                self.cmd_vel_pub.publish(Twist())
+                            except Exception as e:
+                                rospy.logwarn("停止机器人时出错: %s", str(e))
+                        self.is_navigating = False
+                        rospy.loginfo("导航流程结束")
+                        return
+
+                except Exception as e:
+                    rospy.logwarn("返回终点失败: %s", str(e))
+                    self.is_navigating = False
+                    return
+            except Exception as e:
+                rospy.logwarn("根据 Tag 执行后续路径时出错: %s", str(e))
         else:
             rospy.logwarn("导航点列表为空")
 
