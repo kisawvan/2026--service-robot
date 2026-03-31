@@ -39,3 +39,5 @@
 - **配置建议**: 确保 `move_base` 已启动并能接受外部 `MoveBaseGoal`，AprilTag 检测节点在 ` /apriltag_detector/detections` 发布消息以支持自动分支决策。
 
 更多实现细节见 [auto_slam.py](auto_slam.py).
+
+### 贡献者
