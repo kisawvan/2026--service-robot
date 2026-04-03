@@ -5,13 +5,74 @@
 
 ####  硬件层说明
 
+- 上位机：Jetson Nano
+- 深度/双目视觉：用于 AprilTag 检测与视觉任务
+- 激光雷达：用于建图与定位导航
+- 底盘与电机控制：执行线速度/角速度指令
+
 #### 软件应用层架构
 
+- 操作系统：Ubuntu 18.04
+- 机器人中间件：ROS（catkin 工作空间）
+- 主要功能包：
+	- `match_mini`：导航主逻辑、任务流程
+	- `robot_slam` / `rplidar_ros`：建图与定位
+	- `robot_vision`：AprilTag 等视觉检测
+	- `robot_base`：底盘基础控制
+
 #### 赛项流程
+
+1. 启动底盘、传感器、定位导航与视觉检测节点。
+2. 发送任务触发信号到 `auto_slam`。
+3. `auto_slam_node` 根据按键值选择航点文件与执行策略。
+4. 机器人先完成区域 2 弓字形覆盖，再前往检测点等待 AprilTag。
+5. 根据识别到的 Tag（1 或 3）决定后续区域清扫顺序。
+6. 清扫完成后优先返回第 4 个航点，若不存在则返回原点并停车。
 
 
 
 #### 操作说明
+
+1. 准备环境
+
+```bash
+cd ~/code_819/robot_ws
+source devel/setup.bash
+```
+
+2. 按项目脚本依次启动基础能力（示例）
+
+```bash
+cd ~/code_819/robot_shell
+./3-lidar.launch
+./8-navigation.sh
+./11-apriltag_detector.sh
+```
+
+3. 启动自动导航节点
+
+```bash
+rosrun match_mini auto_slam.py
+```
+
+4. 触发任务（向 `auto_slam` 发布字符串）
+
+```bash
+rostopic pub /auto_slam std_msgs/String "data: 'start'" -1
+```
+
+5. 可选：先发布按键主题决定任务模式
+
+```bash
+rostopic pub /key_input std_msgs/String "data: 'g'" -1
+```
+
+按键说明（来自代码逻辑）：
+
+- `g`：使用 `waypoints5_1.xml`，并先前往初始化点 `(1.9, 1.87)`。
+- `h`：使用 `waypoints5_1.xml`，初始 Tag 设为 1。
+- `j`：使用 `waypoints5_3.xml`，初始 Tag 设为 3。
+- 其他值：默认使用 `waypoints5_1.xml`。
 
 #### 拓展功能
 
@@ -19,30 +80,67 @@
 
 **功能概述**
 
-- **主程序文件**: 本仓库的自动导航与弓字形覆盖清扫逻辑位于 [auto_slam.py](auto_slam.py)。
-- **运行方式**: 作为一个 ROS 节点 `auto_slam_node` 启动，订阅 `auto_slam` 主题以触发导航流程。
-- **核心功能**: 基于 `move_base` action 实现点到点导航，解析 XML 航点文件生成航点序列，并在关键区域执行弓字形（覆盖式）路径以完成局部覆盖清扫。
-- **AprilTag 支持**: 在指定检测点等待 AprilTag（二维码）识别，识别结果用于决定后续航点分支逻辑。
-- **输入/输出接口**: 订阅 `/apriltag_detector/detections`、`/odom`、`key_input` 和 `auto_slam`；发布 `/initialpose`（初始位姿）和 `/cmd_vel`（速度控制）。
+- **主程序文件**: 自动导航与弓字形覆盖清扫逻辑位于 [robot_ws/src/match_mini/scripts/auto_slam.py](robot_ws/src/match_mini/scripts/auto_slam.py)。
+- **运行方式**: 以 ROS 节点 `auto_slam_node` 运行，订阅 `auto_slam` 主题触发完整导航任务。
+- **核心能力**: 基于 `move_base` action 实现精确点到点导航，结合 XML 航点和局部覆盖路径完成多区域清扫。
+- **视觉决策**: 在检测点等待 AprilTag 识别，依据 Tag 结果动态调整后续区域执行顺序。
+- **安全结束**: 任务结束自动返回终点（或原点）并发布零速 `Twist()` 停车。
 
 **主要组件与函数**
 
-- **NavigationController**: 程序核心类，封装 ROS 通信、导航动作客户端、航点解析与控制流程。
-- **parse_xml(xml_file)**: 解析 XML 格式的航点文件（waypoints），返回航点列表。
-- **generate_special_path(start_x, start_y, idex, forward_length=0.75)**: 为指定起点生成弓字形覆盖路径点序列，支持不同模式（idex 1/2/3）。
-- **navigate_to_point(point, index, total)**: 构造并发送 `MoveBaseGoal` 到 `move_base`，等待结果并返回成功/失败。
-- **execute_special_path(start_x, start_y, idex)**: 依次导航到弓字形路径中的每个点完成覆盖动作。
-- **navigate_points(points, id)**: 按照不同场景 id（例如 1 或 3）编排多段导航与局部覆盖流程（包含避障点与分段执行）。
-- **start_navigation()**: 导航主流程入口；根据按键选择 XML、前往指定区域、执行弓字形清扫、移动到检测点并等待 AprilTag 识别，随后根据识别结果继续后续航点。
-- **callback(msg, controller)**: 订阅 `auto_slam` 主题的触发回调，用于启动导航流程。
+- **NavigationController**：核心控制类，负责订阅/发布、action 通信、路径规划与任务编排。
+- **parse_xml(xml_file)**：解析航点 XML，输出 `[[pos+quat], ...]` 的导航点列表。
+- **generate_special_path(start_x, start_y, idex, forward_length=0.75)**：生成 9 点弓字形覆盖轨迹（支持 1/2/3 三种模式）。
+- **navigate_to_point(point, index, total)**：下发 `MoveBaseGoal`，等待结果并判断 `GoalStatus`。
+- **execute_special_path(start_x, start_y, idex)**：依次执行弓字形轨迹中的每个路径点。
+- **navigate_points(points, id)**：Tag 分支下的组合路径流程（含避障过渡点）。
+- **start_navigation()**：任务入口，完成“区域2预清扫 -> 检测点识别 -> 分支清扫 -> 返航停车”全流程。
+- **callback(msg, controller)**：收到触发后启动任务，若正在执行则忽略重复触发。
+
+**节点通信接口（按代码整理）**
+
+- 订阅话题：
+	- `/apriltag_detector/detections`（`robot_vision/AprilTagDetection`）
+	- `/odom`（`nav_msgs/Odometry`）
+	- `/key_input`（`std_msgs/String`）
+	- `/auto_slam`（`std_msgs/String`，任务触发）
+- 发布话题：
+	- `/initialpose`（`geometry_msgs/PoseWithCovarianceStamped`）
+	- `/cmd_vel`（`geometry_msgs/Twist`，用于停车）
+- 动作接口：
+	- `move_base`（`move_base_msgs/MoveBaseAction`）
+
+**主流程详解（start_navigation）**
+
+1. 根据 `key_input` 选择航点文件（`waypoints5_1.xml` 或 `waypoints5_3.xml`）。
+2. 导航到区域 2（`points[1]`）并执行弓字形覆盖（idex=1）。
+3. 前往检测点 `(2.41, 2.48)`，朝向 `45°`，开启 AprilTag 等待。
+4. 若识别为 `tag==1`：先执行 `points[0]`，再执行 `points[2]`。
+5. 若识别为 `tag==3`：先执行 `points[2]`，再执行 `points[0]`。
+6. 任务结束优先返回 `points[3]`，否则返回 `(0,0)`；最后发布零速停车。
 
 **运行与集成注意事项**
 
-- **依赖**: 依赖 ROS（move_base、actionlib）、`robot_vision` 中的 `AprilTagDetection` 消息类型以及标准消息类型（`nav_msgs/Odometry`、`geometry_msgs` 等）。
-- **航点文件路径**: 代码中示例使用类似 `/home/bcsh/waypoints5_1.xml` 的绝对路径，运行前请根据实际环境调整为工作空间内或设备上的正确路径（例如仓库根目录下的 `waypoints*.xml`）。
-- **配置建议**: 确保 `move_base` 已启动并能接受外部 `MoveBaseGoal`，AprilTag 检测节点在 ` /apriltag_detector/detections` 发布消息以支持自动分支决策。
+- **依赖**：`move_base`、`actionlib`、`tf`、`robot_vision/AprilTagDetection` 及常见 ROS 消息包。
+- **航点路径**：当前代码中为绝对路径（如 `/home/bcsh/waypoints5_1.xml`），部署时建议改为参数化路径，避免换机后失效。
+- **检测等待机制**：检测点处为阻塞等待（循环直到识别到 Tag 或节点退出），建议比赛时确保检测节点稳定发布。
+- **导航超时**：单个目标默认等待 60s，超时会记录告警并继续后续逻辑。
 
-更多实现细节见 [auto_slam.py](auto_slam.py).
+**建议优化（可选）**
+
+1. 将 XML 路径、检测点坐标、等待超时改为 ROS 参数。
+2. 为 AprilTag 增加等待超时与重试策略，避免无限等待。
+3. 增加状态机日志（阶段开始/结束）便于现场定位问题。
+4. 在关键动作前后补充 `rostopic echo` 检查脚本。
+
+更多实现细节见 [robot_ws/src/match_mini/scripts/auto_slam.py](robot_ws/src/match_mini/scripts/auto_slam.py)。
+
+#### 目录结构（简要）
+
+- `robot_ws/`：主 ROS 工作空间（导航、底盘、SLAM 等）
+- `vision_ws/`：视觉相关工作空间
+- `robot_shell/`：常用启动脚本集合
+- `waypoints*.xml`：任务航点文件
 
 #### 贡献者
 - 
