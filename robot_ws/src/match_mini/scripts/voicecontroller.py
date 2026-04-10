@@ -7,8 +7,8 @@ import os
 import rospy
 
 import time
-from respeaker_interface import RespeakerInterface
-from respeaker_audio import RespeakerAudio
+# from respeaker_interface import RespeakerInterface
+# from respeaker_audio import RespeakerAudio
 from std_msgs.msg import String
 import threading
 import tty
@@ -20,14 +20,15 @@ class VoiceController(object):
         self.node_name = node_name
         rospy.init_node(node_name)
         rospy.on_shutdown(self.shutdown)
-        self.respeaker_interface = RespeakerInterface()
-        self.respeaker_audio = RespeakerAudio()
+        # self.respeaker_interface = RespeakerInterface()
+        # self.respeaker_audio = RespeakerAudio()
         self.ask_pub = rospy.Publisher('cmd_msg', String, queue_size=5)
         self.key_pub = rospy.Publisher('key_input', String, queue_size=10)  # 新增按键发布器
 
     def shutdown(self):
-        self.respeaker_interface.close()
-        self.respeaker_audio.stop()
+        pass
+        # self.respeaker_interface.close()
+        # self.respeaker_audio.stop()
 
 def callback(msg):
     os.system("mpg123 /home/bcsh/robot_ws/src/match_mini/voice/zhuabu.mp3")
@@ -36,6 +37,10 @@ def callback(msg):
 def listen_keyboard():
     rospy.loginfo("按下 g、h 或 j 启动自动导航，按 q 退出...")
     
+    if not sys.stdin.isatty():
+        rospy.logwarn("没有检测到终端输入(可能因为使用了roslaunch无输出界面)，键盘监听功能将被禁用。")
+        return
+
     # 保存原始终端设置
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
