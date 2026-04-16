@@ -86,7 +86,7 @@ class NavigationController:
             rospy.logerr("XML解析错误: %s", str(e))
             return []
 
-    def generate_special_path(self, start_x, start_y, idex, forward_length=0.75):
+    def generate_special_path(self, start_x, start_y, idex, forward_length=0.72):
         """生成特殊弓字形路径点序列 (参考C++实现)"""
         # 固定侧向移动距离
         first_side_length = 0.15  # 15cm
