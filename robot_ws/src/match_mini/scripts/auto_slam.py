@@ -86,7 +86,7 @@ class NavigationController:
             rospy.logerr("XML解析错误: %s", str(e))
             return []
 
-    def generate_special_path(self, start_x, start_y, idex, forward_length=0.72):
+    def generate_special_path(self, start_x, start_y, idex, forward_length=0.7):
         """生成特殊弓字形路径点序列 (参考C++实现)"""
         # 固定侧向移动距离
         first_side_length = 0.15  # 15cm
@@ -201,6 +201,37 @@ class NavigationController:
                 [start_x + forward_length,
                 start_y + first_side_length3 + second_side_length3 + third_side_length3 + fourth_side_length3 + addition_side_length, 0.0, left_quat[0], left_quat[1], left_quat[2], left_quat[3]]
             ]
+        elif idex == 4:
+            return [
+                # 第一步: 前进forward_length (X方向)
+                [start_x + forward_length, start_y, 0.0, right_quat[0], right_quat[1], right_quat[2], right_quat[3]],
+
+                # 第二步: 前进first_side_length (Y方向)
+                [start_x + forward_length, start_y + first_side_length, 0.0, front_quat[0], front_quat[1], front_quat[2],
+                front_quat[3]],
+
+                # 第三步: 后退forward_length (负X方向)
+                [start_x, start_y + first_side_length, 0.0, right_quat[0], right_quat[1], right_quat[2], right_quat[3]],
+
+                # 第四步: 前进second_side_length (Y方向)
+                [start_x, start_y + first_side_length + second_side_length, 0.0, front_quat[0], front_quat[1], front_quat[2], front_quat[3]],
+
+                # 第五步: 前进forward_length (X方向)
+                [start_x + forward_length, start_y + first_side_length + second_side_length, 0.0, right_quat[0], right_quat[1], right_quat[2], right_quat[3]],
+
+                # 第六步: 前进forward_length (X方向)
+                [start_x + forward_length, start_y + first_side_length + second_side_length + third_side_length, 0.0, front_quat[0], front_quat[1], front_quat[2], front_quat[3]],
+
+                # 第七步: 前进forward_length (X方向)
+                [start_x, start_y + first_side_length + second_side_length + third_side_length, 0.0, right_quat[0], right_quat[1], right_quat[2], right_quat[3]],
+
+                # 第八步: 前进forward_length (X方向)
+                [start_x, start_y + first_side_length + second_side_length + third_side_length + fourth_side_length, 0.0, front_quat[0], front_quat[1], front_quat[2], front_quat[3]],
+
+                # 第九步: 前进一半步长即forward_length/2 (X方向)
+                [start_x + forward_length / 2.0,
+                start_y + first_side_length + second_side_length + third_side_length + fourth_side_length, 0.0, left_quat[0], left_quat[1], left_quat[2], left_quat[3]]
+            ]
 
     def navigate_to_point(self, point, index, total):
         """导航到精确坐标点"""
@@ -243,6 +274,8 @@ class NavigationController:
             path_points = self.generate_special_path(start_x, start_y, 2)
         elif idex == 3:
             path_points = self.generate_special_path(start_x, start_y, 3, 0.8)
+        elif idex == 4:
+            path_points = self.generate_special_path(start_x, start_y, 4)
 
         # 执行所有路径点
         for i, point in enumerate(path_points):
@@ -351,7 +384,7 @@ class NavigationController:
 
             # 直接开始弓字形清扫（以区域2为起点）
             rospy.loginfo("开始弓字形清扫（区域2 起点）")
-            self.execute_special_path(points[1][0], points[1][1], 1)
+            self.execute_special_path(points[1][0], points[1][1], 4)
             rospy.sleep(0.05)
 
             # 区域2清扫完成后，前往指定点 (1.89, 2.17) 并设定朝向 45度
@@ -375,6 +408,22 @@ class NavigationController:
             # 打印识别到的结果
             rospy.loginfo("AprilTag 识别完成，tag_id=%s", str(self.tag_id))
             rospy.loginfo("AprilTag 原始消息：%s", str(self.last_tag_msg))
+
+            # 扫描到二维码后，向前执行一小段距离 (0.1m/s 运行 2.5 秒，约 15cm)
+            rospy.loginfo("扫描成功，向前移动一小段距离...")
+            self.move_base.cancel_all_goals() # 取消 move_base 可能正在下发的维持位置指令，避免冲突
+            rospy.sleep(0.1)
+            
+            forward_twist = Twist()
+            forward_twist.linear.x = 0.1
+            # 使用循环机制连续发布速度，避免底层控制板超时保护自动刹车或者被其他节点覆盖
+            start_t = rospy.Time.now()
+            while (rospy.Time.now() - start_t).to_sec() < 2.5 and not rospy.is_shutdown():
+                self.cmd_vel_pub.publish(forward_twist)
+                rospy.sleep(0.1)
+                
+            self.cmd_vel_pub.publish(Twist()) # 停止
+            rospy.sleep(0.05)
 
             # 打印当前路径点1和路径点2坐标（如果存在）
             try:
