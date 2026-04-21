@@ -387,11 +387,11 @@ class NavigationController:
             self.execute_special_path(points[1][0], points[1][1], 4)
             rospy.sleep(0.05)
 
-            # 区域2清扫完成后，前往指定点 (1.89, 2.17) 并设定朝向 45度
+            # 区域2清扫完成后，前往指定点 (2.31, 2.21) 并设定朝向 45度
             try:
                 target_quat = tf_trans.quaternion_from_euler(0, 0, math.pi / 4)
-                target_point = [1.89, 2.17, 0, target_quat[0], target_quat[1], target_quat[2], target_quat[3]]
-                rospy.loginfo("清扫完成，前往检测点 (1.89, 2.17) 并设朝向 45°")
+                target_point = [2.31, 2.21, 0, target_quat[0], target_quat[1], target_quat[2], target_quat[3]]
+                rospy.loginfo("清扫完成，前往检测点 (2.31, 2.21) 并设朝向 45°")
                 self.navigate_to_point(target_point, 0, len(points))
                 rospy.sleep(0.05)
             except Exception as e:
