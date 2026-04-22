@@ -1,0 +1,12 @@
+<launch>
+    <!-- 启动摄像头节点 (如果底层还没启动usb_cam，可取消下面注释) -->
+    <!--
+    <include file="$(find robot_vision)/launch/usb_cam.launch" />
+    -->
+
+    <!-- 启动手势识别节点 -->
+    <node pkg="robot_vision" type="gesture_recognition.py" name="gesture_recognition_node" output="screen" />
+    
+    <!-- 启动rqt_image_view用于可视化 -->
+    <node pkg="rqt_image_view" type="rqt_image_view" name="view_gesture" args="/gesture_recognition/image" />
+</launch>
