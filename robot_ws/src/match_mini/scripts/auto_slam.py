@@ -86,7 +86,7 @@ class NavigationController:
             rospy.logerr("XML解析错误: %s", str(e))
             return []
 
-    def generate_special_path(self, start_x, start_y, idex, forward_length=0.7):
+    def generate_special_path(self, start_x, start_y, idex, forward_length=0.65):
         """生成特殊弓字形路径点序列 (参考C++实现)"""
         # 固定侧向移动距离
         first_side_length = 0.15  # 15cm
@@ -368,7 +368,7 @@ class NavigationController:
             if key_val == "g":
                 try:
                     init_quat = tf_trans.quaternion_from_euler(0, 0, 0)
-                    init_point = [1.9, 1.87, 0, init_quat[0], init_quat[1], init_quat[2], init_quat[3]]
+                    init_point = [1.675, 1.889, 0, init_quat[0], init_quat[1], init_quat[2], init_quat[3]]
                     rospy.loginfo("按下'g'，先前往初始化点 (1.9, 1.87)")
                     self.navigate_to_point(init_point, 0, len(points))
                     rospy.sleep(0.05)
@@ -390,7 +390,7 @@ class NavigationController:
             # 区域2清扫完成后，前往指定点 (2.31, 2.21) 并设定朝向 45度
             try:
                 target_quat = tf_trans.quaternion_from_euler(0, 0, math.pi / 4)
-                target_point = [2.31, 2.21, 0, target_quat[0], target_quat[1], target_quat[2], target_quat[3]]
+                target_point = [2.086, 2.223, 0, target_quat[0], target_quat[1], target_quat[2], target_quat[3]]
                 rospy.loginfo("清扫完成，前往检测点 (2.31, 2.21) 并设朝向 45°")
                 self.navigate_to_point(target_point, 0, len(points))
                 rospy.sleep(0.05)
@@ -444,11 +444,23 @@ class NavigationController:
                 if len(points) < 3:
                     rospy.logwarn("导航点数量不足（%d），无法按要求执行点1/点3的弓字形", len(points))
                 else:
+                    trans_quat = tf_trans.quaternion_from_euler(0, 0, 0)
+                    trans_point = [1.068, 1.083, 0.0, trans_quat[0], trans_quat[1], trans_quat[2], trans_quat[3]]
+
                     if tag == 1:
                         rospy.loginfo("Tag==1: 先执行路径点1的弓字形，再执行路径点3的弓字形")
+                        
+                        rospy.loginfo("前往过渡点 (1.068, 1.083)")
+                        self.navigate_to_point(trans_point, 0, len(points))
+                        rospy.sleep(0.05)
+
                         self.navigate_to_point(points[0], 1, len(points))
                         rospy.sleep(0.05)
                         self.execute_special_path(points[0][0], points[0][1], 1)
+                        rospy.sleep(0.05)
+
+                        rospy.loginfo("前往过渡点 (1.068, 1.083)")
+                        self.navigate_to_point(trans_point, 0, len(points))
                         rospy.sleep(0.05)
 
                         self.navigate_to_point(points[2], 2, len(points))
@@ -458,9 +470,18 @@ class NavigationController:
 
                     elif tag == 3:
                         rospy.loginfo("Tag==3: 先执行路径点3的弓字形，再执行路径点1的弓字形")
+
+                        rospy.loginfo("前往过渡点 (1.068, 1.083)")
+                        self.navigate_to_point(trans_point, 0, len(points))
+                        rospy.sleep(0.05)
+
                         self.navigate_to_point(points[2], 1, len(points))
                         rospy.sleep(0.05)
                         self.execute_special_path(points[2][0], points[2][1], 1)
+                        rospy.sleep(0.05)
+
+                        rospy.loginfo("前往过渡点 (1.068, 1.083)")
+                        self.navigate_to_point(trans_point, 0, len(points))
                         rospy.sleep(0.05)
 
                         self.navigate_to_point(points[0], 2, len(points))

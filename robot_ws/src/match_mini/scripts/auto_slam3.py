@@ -27,6 +27,7 @@ class NavigationController:
         # AprilTag检测相关
         self.tag_id = None
         self.waiting_for_tag = False
+        self.last_tag_msg = None
         self.tag_sub = rospy.Subscriber("/apriltag_detector/detections",
                                         AprilTagDetection,
                                         self.tag_callback)
@@ -48,9 +49,16 @@ class NavigationController:
 
     def tag_callback(self, msg):
         """处理二维码检测结果"""
+        try:
+            self.last_tag_msg = msg
+            self.tag_id = getattr(msg, 'tag_id', None)
+        except Exception:
+            self.last_tag_msg = None
+            self.tag_id = None
+
         if self.waiting_for_tag:
-            self.tag_id = msg.tag_id
-            rospy.loginfo("检测到AprilTag ID: %d", self.tag_id)
+            rospy.loginfo("检测到AprilTag ID: %s", str(self.tag_id))
+            rospy.loginfo("AprilTag 消息: %s", str(self.last_tag_msg))
             self.waiting_for_tag = False
 
     def key_callback(self, msg):
@@ -297,59 +305,174 @@ class NavigationController:
 
         self.is_navigating = True
         rospy.loginfo("开始导航流程")
-        # 如果按下 'g'，优先前往 (1.9, 1.87)，并跳过起点二维码检测
+        
+        # 修改流程：不再在起点进行二维码检测。
+        # 流程：根据按键选择路径 -> 先执行前往并在 区域2 做前进动作 -> 直接进行弓字形清扫 -> 在清扫完成点等待二维码识别
         xml_file = ""
-        if getattr(self, 'key', None) == "g":
+        key_val = getattr(self, 'key', None)
+        if key_val == "g":
             xml_file = "/home/bcsh/waypoints3_1.xml"
-            try:
-                init_quat = tf_trans.quaternion_from_euler(0, 0, 0)
-                init_point = [1.9, 1.87, 0, init_quat[0], init_quat[1], init_quat[2], init_quat[3]]
-                rospy.loginfo("按下'g'，跳过检测，先前往 (1.9, 1.87)")
-                self.navigate_to_point(init_point, 0, 1)
-                rospy.sleep(0.05)
-            except Exception as e:
-                rospy.logwarn("前往初始化点失败: %s", str(e))
+        elif key_val == "h":
+            xml_file = "/home/bcsh/waypoints3_1.xml"
+            self.tag_id = 1
+        elif key_val == "j":
+            xml_file = "/home/bcsh/waypoints3_3.xml"
+            self.tag_id = 3
         else:
-            # 1. 二维码检测准备
-            rospy.loginfo("准备二维码检测...")
-            self.waiting_for_tag = True
-            self.tag_id = None
+            xml_file = "/home/bcsh/waypoints3_1.xml"
 
-            # 2. 移动到检测位置
-            quat = tf_trans.quaternion_from_euler(0, 0, -math.pi / 2)  # 90
-            detection_point = [0.65, 0.0, 0, quat[0], quat[1], quat[2], quat[3]]
-            self.navigate_to_point(detection_point, 0, 1)
-
-            # 3. 等待二维码检测 (最多5秒)
-            timeout = 5.0
-            start_time = rospy.Time.now().to_sec()
-            while (rospy.Time.now().to_sec() - start_time < timeout and
-                   self.waiting_for_tag and not rospy.is_shutdown()):
-                rospy.sleep(0.1)
-
-            # 4. 根据检测结果选择路径
-            if self.key == "g":
-                if self.tag_id == 1:
-                    xml_file = "/home/bcsh/waypoints3_1.xml"
-                elif self.tag_id == 3:
-                    xml_file = "/home/bcsh/waypoints3_3.xml"
-                else:
-                    xml_file = "/home/bcsh/waypoints3_1.xml"
-            elif self.key == "h":
-                xml_file = "/home/bcsh/waypoints3_1.xml"
-                self.tag_id = 1
-            elif self.key == "j":
-                xml_file = "/home/bcsh/waypoints3_3.xml"
-                self.tag_id = 3
-
-        # 5. 解析并执行路径
+        # 解析并执行路径（先到区域2，再进行弓字形清扫，然后在清扫结束点等待二维码识别）
         points = self.parse_xml(xml_file)
         if points:
-            # 增强健壮性：确保索引存在
+            # 如果按下 'g'，优先前往 (1.9, 1.87)
+            if key_val == "g":
+                try:
+                    init_quat = tf_trans.quaternion_from_euler(0, 0, 0)
+                    init_point = [1.9, 1.87, 0, init_quat[0], init_quat[1], init_quat[2], init_quat[3]]
+                    rospy.loginfo("按下'g'，先前往初始化点 (1.9, 1.87)")
+                    self.navigate_to_point(init_point, 0, len(points))
+                    rospy.sleep(0.05)
+                except Exception as e:
+                    rospy.logwarn("前往初始化点失败: %s", str(e))
+            # 先前往区域2（points[1]）并执行前进动作
             try:
-                self.navigate_points(points, getattr(self, 'tag_id', 1))
+                rospy.loginfo("前往区域2并执行前进动作")
+                self.navigate_to_point(points[1], 1, len(points))
+                rospy.sleep(0.05)
             except Exception as e:
-                rospy.logwarn("执行导航时出错: %s", str(e))
+                rospy.logwarn("前往区域2失败: %s", str(e))
+
+            # 直接开始弓字形清扫（以区域2为起点）
+            rospy.loginfo("开始弓字形清扫（区域2 起点）")
+            self.execute_special_path(points[1][0], points[1][1], 2 if getattr(self, 'tag_id', None) != 3 else 5)
+            rospy.sleep(0.05)
+
+            # 区域2清扫完成后，前往指定点 (2.31, 2.21) 并设定朝向 45度
+            try:
+                target_quat = tf_trans.quaternion_from_euler(0, 0, math.pi / 4)
+                target_point = [2.31, 2.21, 0, target_quat[0], target_quat[1], target_quat[2], target_quat[3]]
+                rospy.loginfo("清扫完成，前往检测点 (2.31, 2.21) 并设朝向 45°")
+                self.navigate_to_point(target_point, 0, len(points))
+                rospy.sleep(0.05)
+            except Exception as e:
+                rospy.logwarn("前往检测点失败: %s", str(e))
+
+            # 到达后开启 AprilTag 识别等待（无限等待直到检测到二维码或节点关闭）
+            rospy.loginfo("开启 AprilTag 识别并等待结果...")
+            self.waiting_for_tag = True
+            self.tag_id = None
+            self.last_tag_msg = None
+            while (not rospy.is_shutdown() and self.waiting_for_tag):
+                rospy.sleep(0.1)
+
+            # 打印识别到的结果
+            rospy.loginfo("AprilTag 识别完成，tag_id=%s", str(self.tag_id))
+            rospy.loginfo("AprilTag 原始消息：%s", str(self.last_tag_msg))
+
+            # 扫描到二维码后，向前执行一小段距离 (0.1m/s 运行 2.5 秒，约 15cm)
+            rospy.loginfo("扫描成功，向前移动一小段距离...")
+            self.move_base.cancel_all_goals() # 取消 move_base 可能正在下发的维持位置指令，避免冲突
+            rospy.sleep(0.1)
+            
+            forward_twist = Twist()
+            forward_twist.linear.x = 0.1
+            # 使用循环机制连续发布速度，避免底层控制板超时保护自动刹车或者被其他节点覆盖
+            start_t = rospy.Time.now()
+            while (rospy.Time.now() - start_t).to_sec() < 2.5 and not rospy.is_shutdown():
+                self.cmd_vel_pub.publish(forward_twist)
+                rospy.sleep(0.1)
+                
+            self.cmd_vel_pub.publish(Twist()) # 停止
+            rospy.sleep(0.05)
+
+            # 打印当前路径点1和路径点2坐标（如果存在）
+            try:
+                if len(points) >= 2:
+                    rospy.loginfo("路径点1 坐标: x=%.3f, y=%.3f", points[0][0], points[0][1])
+                    rospy.loginfo("路径点2 坐标: x=%.3f, y=%.3f", points[1][0], points[1][1])
+                else:
+                    rospy.logwarn("路径点数量不足，无法打印路径点1/2坐标")
+            except Exception as e:
+                rospy.logwarn("打印路径点坐标出错: %s", str(e))
+
+            # 根据识别结果决定执行顺序：
+            # tag==1 -> 先执行 points[0] 的弓字形，再执行 points[2] 的弓字形
+            # tag==3 -> 先执行 points[2] 的弓字形，再执行 points[0] 的弓字形
+            try:
+                tag = self.tag_id if self.tag_id is not None else 1
+                if len(points) < 3:
+                    rospy.logwarn("导航点数量不足（%d），无法按要求执行点1/点3的弓字形", len(points))
+                else:
+                    if tag == 1:
+                        rospy.loginfo("Tag==1: 先执行路径点1的弓字形，再执行路径点3的弓字形")
+                        self.navigate_to_point(points[0], 1, len(points))
+                        rospy.sleep(0.05)
+                        self.execute_special_path(points[0][0], points[0][1], 1)
+                        rospy.sleep(0.05)
+
+                        self.navigate_to_point(points[2], 2, len(points))
+                        rospy.sleep(0.05)
+                        self.execute_special_path(points[2][0], points[2][1], 3)
+                        rospy.sleep(0.05)
+
+                    elif tag == 3:
+                        rospy.loginfo("Tag==3: 先执行路径点3的弓字形，再执行路径点1的弓字形")
+                        self.navigate_to_point(points[2], 1, len(points))
+                        rospy.sleep(0.05)
+                        self.execute_special_path(points[2][0], points[2][1], 6)
+                        rospy.sleep(0.05)
+
+                        self.navigate_to_point(points[0], 2, len(points))
+                        rospy.sleep(0.05)
+                        self.execute_special_path(points[0][0], points[0][1], 4)
+                        rospy.sleep(0.05)
+
+                    else:
+                        rospy.loginfo("未识别到指定 Tag（%s），使用默认导航逻辑", str(tag))
+                        self.navigate_points(points, tag)
+
+                # 完成后：优先返回路径点4(points[3])并在该点停止；若不存在则返回原点 (0,0)
+                try:
+                    if len(points) > 3:
+                        rospy.loginfo("任务完成，返回路径点4 并在该点停止运行")
+                        return_point = points[3]
+                        success = self.navigate_to_point(return_point, 0, 1)
+                        if success:
+                            try:
+                                self.cmd_vel_pub.publish(Twist())
+                            except Exception as e:
+                                rospy.logwarn("停止机器人时出错: %s", str(e))
+                            self.is_navigating = False
+                            rospy.loginfo("已到达路径点4并停止运行")
+                            return
+                        else:
+                            rospy.logwarn("到达路径点4失败，尝试停止并结束流程")
+                            try:
+                                self.cmd_vel_pub.publish(Twist())
+                            except Exception:
+                                pass
+                            self.is_navigating = False
+                            return
+                    else:
+                        origin_quat = tf_trans.quaternion_from_euler(0, 0, 0)
+                        origin_point = [0.0, 0.0, 0.0, origin_quat[0], origin_quat[1], origin_quat[2], origin_quat[3]]
+                        rospy.loginfo("任务完成，路径点4不存在，返回起点 (0,0)")
+                        success = self.navigate_to_point(origin_point, 0, 1)
+                        if success:
+                            try:
+                                self.cmd_vel_pub.publish(Twist())
+                            except Exception as e:
+                                rospy.logwarn("停止机器人时出错: %s", str(e))
+                        self.is_navigating = False
+                        rospy.loginfo("导航流程结束")
+                        return
+
+                except Exception as e:
+                    rospy.logwarn("返回终点失败: %s", str(e))
+                    self.is_navigating = False
+                    return
+            except Exception as e:
+                rospy.logwarn("根据 Tag 执行后续路径时出错: %s", str(e))
         else:
             rospy.logwarn("导航点列表为空")
 

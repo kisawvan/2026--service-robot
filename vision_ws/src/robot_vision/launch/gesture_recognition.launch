@@ -4,8 +4,8 @@
     <include file="$(find robot_vision)/launch/usb_cam.launch" />
     -->
 
-    <!-- 启动手势识别节点 -->
-    <node pkg="robot_vision" type="gesture_recognition.py" name="gesture_recognition_node" output="screen" />
+    <!-- 启动手势识别节点，强制使用 python3.8 执行以避免被 ROS Melodic 默认分配给 Python 2 -->
+    <node pkg="robot_vision" type="gesture_recognition.py" name="gesture_recognition_node" output="screen" launch-prefix="python3.8" />
     
     <!-- 启动rqt_image_view用于可视化 -->
     <node pkg="rqt_image_view" type="rqt_image_view" name="view_gesture" args="/gesture_recognition/image" />
