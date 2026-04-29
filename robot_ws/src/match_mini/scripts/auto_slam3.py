@@ -419,7 +419,8 @@ class NavigationController:
                         rospy.loginfo("Tag==3: 先执行路径点3的弓字形，再执行路径点1的弓字形")
                         self.navigate_to_point(points[2], 1, len(points))
                         rospy.sleep(0.05)
-                        self.execute_special_path(points[2][0], points[2][1], 6)
+                        # 使用与 Tag==1 到区域3 相同的弓字形路径 (idex=3)
+                        self.execute_special_path(points[2][0], points[2][1], 3)
                         rospy.sleep(0.05)
 
                         self.navigate_to_point(points[0], 2, len(points))

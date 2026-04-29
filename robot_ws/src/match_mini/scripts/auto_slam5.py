@@ -260,7 +260,8 @@ class NavigationController:
             #self.navigate_to_point([2.53, 1.51, 0, front_quat[0], front_quat[1], front_quat[2], front_quat[3]], 1, 3)  # 定点1
 
             self.navigate_to_point(points[2], 3, 3)  # 第三个区域
-            self.execute_special_path(points[2][0], points[2][1], 1)
+            # 使用与 Tag==1 到区域3 相同的弓字形路径 (idex=2)
+            self.execute_special_path(points[2][0], points[2][1], 2)
 
     def start_navigation(self):
         if self.is_navigating:

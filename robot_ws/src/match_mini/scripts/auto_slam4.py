@@ -21,25 +21,31 @@ class NavigationController:
 
         # 导航状态控制
         self.is_navigating = False
-        self.current_position = [0.0, 0.0]  # 当前位置
+                        return_points = []
+                        if tag in (1, 3) and len(points) > 1:
+                            return_points.append((points[1], "中间点"))
+                        return_points.append((points[3], "路径点4"))
 
-        # AprilTag检测相关
-        self.tag_id = None
-        self.waiting_for_tag = False
-        self.tag_sub = rospy.Subscriber("/apriltag_detector/detections",
-                                        AprilTagDetection,
-                                        self.tag_callback)
-        self.cmd_vel_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
+                        rospy.loginfo("任务完成，开始返回终点")
+                        for index, (return_point, point_name) in enumerate(return_points, start=1):
+                            rospy.loginfo("返回流程第%d步：前往%s", index, point_name)
+                            success = self.navigate_to_point(return_point, 0, 1)
+                            if not success:
+                                rospy.logwarn("到达%s失败，终止返回流程", point_name)
+                                try:
+                                    self.cmd_vel_pub.publish(Twist())
+                                except Exception:
+                                    pass
+                                self.is_navigating = False
+                                return
 
-        # 订阅里程计获取位置
-        self.odom_sub = rospy.Subscriber("/odom", Odometry, self.odom_callback)
-
-    def odom_callback(self, msg):
-        try:
-            self.current_position[0] = msg.pose.pose.position.x
-            self.current_position[1] = msg.pose.pose.position.y
-        except Exception as e:
-            rospy.logwarn("无法更新位置: %s", str(e))
+                        try:
+                            self.cmd_vel_pub.publish(Twist())
+                        except Exception as e:
+                            rospy.logwarn("停止机器人时出错: %s", str(e))
+                        self.is_navigating = False
+                        rospy.loginfo("已按返回流程到达终点并停止运行")
+                        return
 
     def tag_callback(self, msg):
         """处理二维码检测结果"""
@@ -402,7 +408,8 @@ class NavigationController:
             self.navigate_to_point([2.54, 1.38, 0, right_quat[0], right_quat[1], right_quat[2], right_quat[3]], 1,
                                    3)  # 定点1
             # self.navigate_to_point(points[2], 3, 3)  # 第三个区域
-            self.execute_special_path(points[2][0], points[2][1], 1, id)
+            # 使用与 id==1 到区域3 相同的弓字形路径 (idex=3)
+            self.execute_special_path(points[2][0], points[2][1], 3, id)
             self.navigate_to_point([1.32, -0.02, 0, back_quat[0], back_quat[1], back_quat[2], back_quat[3]], 1,
                                    3)  # 避免撞箱子
 
