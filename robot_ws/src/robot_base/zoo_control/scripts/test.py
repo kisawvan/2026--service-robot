@@ -94,8 +94,9 @@ if __name__=="__main__":
 	pub = rospy.Publisher('cmd_vel', Twist, queue_size = 1)
 	rospy.init_node('teleop_twist_keyboard')
 
-	speed = rospy.get_param("~speed", 0.3)
-	turn = rospy.get_param("~turn", 1.0)
+	# 默认速度提高到原来的两倍；如果 launch 里显式传参，仍可继续覆盖
+	speed = rospy.get_param("~speed", 0.6)
+	turn = rospy.get_param("~turn", 2.0)
 	x = 0
 	y = 0
 	z = 0

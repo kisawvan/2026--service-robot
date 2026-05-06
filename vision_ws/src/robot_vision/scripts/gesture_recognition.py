@@ -1,186 +1,282 @@
-#!/usr/bin/env python3
-# 简单高精度 OpenCV 手势识别（非 CNN 实现）
+#!/usr/bin/env python3.8
+# -*- coding: utf-8 -*-
+
+import math
+from collections import Counter, deque
+
 import cv2
 import numpy as np
-import math
-import time
+import rospy
+from sensor_msgs.msg import Image
+from std_msgs.msg import String
 
 try:
-    import rospy
-    from sensor_msgs.msg import Image
-    from std_msgs.msg import String
-    ROS_ENABLED = True
+    import mediapipe as mp
 except Exception:
-    ROS_ENABLED = False
+    mp = None
 
 
-class GestureRecognitionOpenCV:
-    """基于肤色直方图校准 + 轮廓 + 凸缺陷计数的手势识别器。
+def imgmsg_to_cv2(img_msg):
+    # 抛弃 cv_bridge，直接解析二进制数据，避免 ROS Melodic 下的 Python3 兼容问题
+    return np.ndarray(shape=(img_msg.height, img_msg.width, 3),
+                      dtype=np.uint8, buffer=img_msg.data)
 
-    使用方法：运行脚本后摄像头画面会显示一个绿色校准框，按 `c` 在框内采样肤色，
-    然后将实时分割手部并统计手指数量；按 `q` 退出。
-    """
 
-    def __init__(self, camera_id=0):
-        self.cap = cv2.VideoCapture(camera_id)
-        self.hist = None
-        self.roi_box = (300, 100, 100, 100)  # x,y,w,h for calibration box
-        self.min_contour_area = 2000
-        if ROS_ENABLED:
-            rospy.init_node('gesture_recognition_opencv_node', anonymous=True)
-            self.result_pub = rospy.Publisher('/gesture_recognition/result', String, queue_size=1)
+def cv2_to_imgmsg(cv_image):
+    img_msg = Image()
+    img_msg.height, img_msg.width, _ = cv_image.shape
+    img_msg.encoding = "bgr8"
+    img_msg.is_bigendian = 0
+    img_msg.data = cv_image.tobytes()
+    img_msg.step = len(img_msg.data) // img_msg.height
+    return img_msg
 
-    def calibrate_from_frame(self, frame):
-        x, y, w, h = self.roi_box
-        roi = frame[y:y+h, x:x+w]
-        if roi.size == 0:
-            return
-        ycrcb = cv2.cvtColor(roi, cv2.COLOR_BGR2YCrCb)
-        # 计算 Cr、Cb 的二维直方图
-        hist = cv2.calcHist([ycrcb], [1, 2], None, [128, 128], [0, 256, 0, 256])
-        cv2.normalize(hist, hist, 0, 255, cv2.NORM_MINMAX)
-        self.hist = hist
 
-    def segment_hand(self, frame):
-        # 先使用直方图回投（若已校准），否则使用 HSV 简单阈值作为后备
-        blur = cv2.GaussianBlur(frame, (7, 7), 0)
-        if self.hist is not None:
-            ycrcb = cv2.cvtColor(blur, cv2.COLOR_BGR2YCrCb)
-            backproj = cv2.calcBackProject([ycrcb], [1, 2], self.hist, [0, 256, 0, 256], 1)
-            # 平滑并二值化
+class GestureRecognitionCV:
+    def __init__(self):
+        rospy.init_node('gesture_recognition_cv_node', anonymous=True)
+
+        # ROS params
+        self.debug = rospy.get_param('~debug', False)
+        self.backend = rospy.get_param('~backend', 'auto')  # auto / mediapipe / opencv
+        self.use_backproj = rospy.get_param('~use_backproj', True)
+        self.min_area = rospy.get_param('~min_area', 2000)
+        self.history_len = rospy.get_param('~history_len', 7)
+        self.min_detection_confidence = rospy.get_param('~min_detection_confidence', 0.65)
+        self.min_tracking_confidence = rospy.get_param('~min_tracking_confidence', 0.65)
+        self.result_topic = rospy.get_param('~result_topic', '/gesture_recognition/result')
+        self.image_topic = rospy.get_param('~image_topic', '/gesture_recognition/image')
+
+        self.image_sub = rospy.Subscriber('/usb_cam/image_raw', Image, self.image_callback, queue_size=1)
+        self.result_pub = rospy.Publisher(self.result_topic, String, queue_size=10)
+        self.image_pub = rospy.Publisher(self.image_topic, Image, queue_size=10)
+
+        self.result_history = deque(maxlen=self.history_len)
+        self.last_published = None
+
+        # 旧方案兜底使用的肤色直方图
+        self.skin_hist = None
+
+        self.use_mediapipe = False
+        self.mp_hands = None
+        self.mp_drawing = None
+        self.mp_styles = None
+        self.hands = None
+
+        if self.backend in ('auto', 'mediapipe') and mp is not None:
+            self.mp_hands = mp.solutions.hands
+            self.mp_drawing = mp.solutions.drawing_utils
+            self.mp_styles = mp.solutions.drawing_styles
+            self.hands = self.mp_hands.Hands(
+                static_image_mode=False,
+                model_complexity=1,
+                max_num_hands=1,
+                min_detection_confidence=self.min_detection_confidence,
+                min_tracking_confidence=self.min_tracking_confidence,
+            )
+            self.use_mediapipe = True
+
+        if self.debug:
+            cv2.namedWindow('gesture_debug', cv2.WINDOW_NORMAL)
+
+        if self.use_mediapipe:
+            rospy.loginfo('Gesture node started with MediaPipe Hands backend.')
+        else:
+            rospy.logwarn('MediaPipe unavailable, fallback to OpenCV contour backend.')
+
+    def __del__(self):
+        try:
+            if self.hands is not None:
+                self.hands.close()
+        except Exception:
+            pass
+
+    def _normalize_label(self, label):
+        mapping = {
+            'FIST': 'FIST',
+            'PALM': 'PALM',
+            'V_SIGN': 'V_SIGN',
+            'POINT': 'POINT',
+            'THUMB_UP': 'THUMB_UP',
+            'THUMB_DOWN': 'THUMB_DOWN',
+            'OK': 'OK',
+            'THREE': 'THREE',
+            'FOUR': 'FOUR',
+            'UNKNOWN': 'UNKNOWN',
+            'NONE': 'NONE',
+        }
+        return mapping.get(label, label)
+
+    def _classify_landmarks(self, landmarks, handedness='Unknown'):
+        pts = landmarks.landmark
+
+        def dist(a, b):
+            return math.hypot(a.x - b.x, a.y - b.y)
+
+        wrist = pts[0]
+        index_mcp, index_pip, index_tip = pts[5], pts[6], pts[8]
+        middle_mcp, middle_pip, middle_tip = pts[9], pts[10], pts[12]
+        ring_mcp, ring_pip, ring_tip = pts[13], pts[14], pts[16]
+        pinky_mcp, pinky_pip, pinky_tip = pts[17], pts[18], pts[20]
+        thumb_mcp, thumb_ip, thumb_tip = pts[2], pts[3], pts[4]
+
+        # 以手掌尺度归一化，避免远近变化导致阈值漂移
+        palm_scale = max(dist(wrist, middle_mcp), 1e-6)
+
+        index_up = index_tip.y < index_pip.y and index_tip.y < index_mcp.y
+        middle_up = middle_tip.y < middle_pip.y and middle_tip.y < middle_mcp.y
+        ring_up = ring_tip.y < ring_pip.y and ring_tip.y < ring_mcp.y
+        pinky_up = pinky_tip.y < pinky_pip.y and pinky_tip.y < pinky_mcp.y
+
+        if handedness == 'Right':
+            thumb_extended = thumb_tip.x < thumb_ip.x < thumb_mcp.x
+        elif handedness == 'Left':
+            thumb_extended = thumb_tip.x > thumb_ip.x > thumb_mcp.x
+        else:
+            thumb_extended = dist(thumb_tip, thumb_ip) > dist(thumb_ip, thumb_mcp) * 0.8
+
+        finger_states = [thumb_extended, index_up, middle_up, ring_up, pinky_up]
+        finger_count = sum(1 for state in finger_states if state)
+
+        thumb_index_dist = dist(thumb_tip, index_tip) / palm_scale
+        all_curled = not any([index_up, middle_up, ring_up, pinky_up])
+        three_up = index_up and middle_up and ring_up and not pinky_up
+
+        if thumb_index_dist < 0.33 and not ring_up and not pinky_up and not middle_up:
+            return 'OK', 0.95
+        if finger_count == 0:
+            return 'FIST', 0.96
+        if finger_count >= 4:
+            return 'PALM', 0.94
+        if index_up and middle_up and not ring_up and not pinky_up and not thumb_extended:
+            return 'V_SIGN', 0.93
+        if index_up and not middle_up and not ring_up and not pinky_up:
+            return 'POINT', 0.92
+        if thumb_extended and not index_up and not middle_up and not ring_up and not pinky_up:
+            return 'THUMB_UP' if thumb_tip.y < wrist.y else 'THUMB_DOWN', 0.90
+        if three_up:
+            return 'THREE', 0.88
+        if finger_count == 4:
+            return 'FOUR', 0.88
+        if all_curled:
+            return 'FIST', 0.90
+        return 'UNKNOWN', 0.50
+
+    def _classify_contour(self, frame):
+        # 保底方案：仍保留旧的肤色/轮廓逻辑，避免依赖不可用时完全失效
+        if self.skin_hist is not None and self.use_backproj:
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            backproj = cv2.calcBackProject([hsv], [0, 1], self.skin_hist, [0, 180, 0, 256], 1)
             disc = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
-            backproj = cv2.filter2D(backproj, -1, disc)
+            cv2.filter2D(backproj, -1, disc, backproj)
             _, mask = cv2.threshold(backproj, 50, 255, cv2.THRESH_BINARY)
         else:
-            hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
-            lower = np.array([0, 30, 60])
-            upper = np.array([25, 255, 255])
-            mask = cv2.inRange(hsv, lower, upper)
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
 
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+            lower_hsv = np.array([0, 20, 40])
+            upper_hsv = np.array([25, 200, 255])
+            mask_hsv = cv2.inRange(hsv, lower_hsv, upper_hsv)
+
+            lower_ycrcb = np.array([0, 133, 77])
+            upper_ycrcb = np.array([255, 173, 127])
+            mask_ycrcb = cv2.inRange(ycrcb, lower_ycrcb, upper_ycrcb)
+
+            mask = cv2.bitwise_and(mask_hsv, mask_ycrcb)
+
         mask = cv2.GaussianBlur(mask, (7, 7), 0)
-        _, mask = cv2.threshold(mask, 50, 255, cv2.THRESH_BINARY)
-        return mask
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
 
-    @staticmethod
-    def count_fingers_from_contour(contour, drawing=None):
-        # 参考凸缺陷法，返回手指计数（保守估计）
-        hull = cv2.convexHull(contour, returnPoints=False)
-        if hull is None or len(hull) < 3:
-            return 0
-        defects = cv2.convexityDefects(contour, hull)
-        if defects is None:
-            return 0
+        contours, _ = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        gesture_result = 'NONE'
+        debug_overlay = frame.copy()
 
-        cnt = 0
-        bounding_rect = cv2.boundingRect(contour)
-        _, _, w, h = bounding_rect
-        depth_threshold = max(20, h * 0.06)
+        if contours:
+            cnt = max(contours, key=cv2.contourArea)
+            if cv2.contourArea(cnt) > self.min_area:
+                cv2.drawContours(debug_overlay, [cnt], -1, (0, 255, 0), 2)
+                hull_points = cv2.convexHull(cnt)
+                cv2.drawContours(debug_overlay, [hull_points], -1, (255, 0, 0), 2)
+                gesture_result = 'PALM' if len(hull_points) > 5 else 'UNKNOWN'
 
-        for i in range(defects.shape[0]):
-            s, e, f, depth = defects[i, 0]
-            start = tuple(contour[s][0])
-            end = tuple(contour[e][0])
-            far = tuple(contour[f][0])
-            a = math.dist(start, end)
-            b = math.dist(start, far)
-            c = math.dist(end, far)
-            # 用余弦定理计算夹角
-            if b * c == 0:
-                continue
-            angle = math.degrees(math.acos(max(-1.0, min(1.0, (b*b + c*c - a*a) / (2*b*c)))))
-            if angle < 90 and depth > depth_threshold:
-                cnt += 1
-                if drawing is not None:
-                    cv2.circle(drawing, far, 5, (0, 255, 0), -1)
+        return gesture_result, 0.55, debug_overlay, mask
 
-        # defects count + 1 ≈ fingers
-        return min(5, cnt + 1)
+    def _smooth_result(self, raw_result):
+        if raw_result == 'UNKNOWN':
+            return self.last_published or 'UNKNOWN'
 
-    def run(self):
-        while True:
-            ret, frame = self.cap.read()
-            if not ret:
-                break
+        self.result_history.append(raw_result)
+        most_common = Counter(self.result_history).most_common(1)
+        return most_common[0][0] if most_common else raw_result
 
-            frame = cv2.flip(frame, 1)
-            vis = frame.copy()
-            x, y, w, h = self.roi_box
-            cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 255, 0), 2)
+    def _publish_result(self, result):
+        if result != self.last_published:
+            self.result_pub.publish(result)
+            self.last_published = result
 
-            mask = self.segment_hand(frame)
-            
-            # 兼容不同 OpenCV 版本的 findContours
-            contour_result = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if len(contour_result) == 3:
-                # OpenCV 3.x: 返回 (image, contours, hierarchy)
-                contours = contour_result[1]
+    def image_callback(self, data):
+        try:
+            frame = imgmsg_to_cv2(data).copy()
+        except Exception as e:
+            rospy.logerr('Image Convert Error: %s', str(e))
+            return
+
+        display = frame.copy()
+        raw_result = 'NONE'
+        confidence = 0.0
+
+        if self.use_mediapipe:
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            rgb_frame.flags.writeable = False
+            results = self.hands.process(rgb_frame)
+            rgb_frame.flags.writeable = True
+
+            if results.multi_hand_landmarks:
+                hand_landmarks = results.multi_hand_landmarks[0]
+                handedness = 'Unknown'
+                if results.multi_handedness:
+                    handedness = results.multi_handedness[0].classification[0].label
+
+                raw_result, confidence = self._classify_landmarks(hand_landmarks, handedness)
+                display = frame.copy()
+                self.mp_drawing.draw_landmarks(
+                    display,
+                    hand_landmarks,
+                    self.mp_hands.HAND_CONNECTIONS,
+                    self.mp_styles.get_default_hand_landmarks_style(),
+                    self.mp_styles.get_default_hand_connections_style(),
+                )
             else:
-                # OpenCV 4.x+: 返回 (contours, hierarchy)
-                contours = contour_result[0]
-            
-            gesture_text = 'None'
+                raw_result = 'NONE'
+                confidence = 0.0
+        else:
+            raw_result, confidence, display, mask = self._classify_contour(frame)
+            if self.debug:
+                cv2.imshow('mask_debug', mask)
 
-            if contours:
-                # 选取最大轮廓
-                contour = max(contours, key=cv2.contourArea)
-                area = cv2.contourArea(contour)
-                if area > self.min_contour_area:
-                    hull = cv2.convexHull(contour)
-                    cv2.drawContours(vis, [contour], -1, (255, 0, 0), 2)
-                    cv2.drawContours(vis, [hull], -1, (0, 0, 255), 2)
-                    finger_count = self.count_fingers_from_contour(contour, drawing=vis)
-                    if finger_count == 0:
-                        gesture_text = 'Fist'
-                    elif finger_count == 1:
-                        gesture_text = 'One'
-                    elif finger_count == 2:
-                        gesture_text = 'Two'
-                    elif finger_count == 3:
-                        gesture_text = 'Three'
-                    elif finger_count == 4:
-                        gesture_text = 'Four'
-                    else:
-                        gesture_text = 'Five'
+        smooth_result = self._smooth_result(raw_result)
+        self._publish_result(smooth_result)
 
-                    if ROS_ENABLED:
-                        try:
-                            self.result_pub.publish(gesture_text)
-                        except Exception:
-                            pass
+        cv2.putText(display, 'Gesture: {}'.format(smooth_result), (10, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+        cv2.putText(display, 'Backend: {}  Conf: {:.2f}'.format('MediaPipe' if self.use_mediapipe else 'OpenCV', confidence),
+                    (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 180, 0), 2)
 
-            cv2.putText(vis, 'Gesture: ' + gesture_text, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
-            cv2.putText(vis, "Press 'c' to calibrate, 'q' to quit", (10, vis.shape[0]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
+        if self.debug:
+            cv2.imshow('gesture_debug', display)
+            cv2.waitKey(1)
 
-            cv2.imshow('Gesture (OpenCV)', vis)
-            cv2.imshow('Mask', mask)
-
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('c'):
-                # 采样多帧并平均直方图以提高鲁棒性
-                samples = []
-                for i in range(8):
-                    ret, f = self.cap.read()
-                    if not ret:
-                        break
-                    f = cv2.flip(f, 1)
-                    x, y, w, h = self.roi_box
-                    roi = f[y:y+h, x:x+w]
-                    samples.append(roi)
-                if samples:
-                    combined = np.vstack([cv2.cvtColor(s, cv2.COLOR_BGR2YCrCb) for s in samples])
-                    hist = cv2.calcHist([combined], [1, 2], None, [128, 128], [0, 256, 0, 256])
-                    cv2.normalize(hist, hist, 0, 255, cv2.NORM_MINMAX)
-                    self.hist = hist
-            elif key == ord('q'):
-                break
-
-        self.cap.release()
-        cv2.destroyAllWindows()
+        try:
+            self.image_pub.publish(cv2_to_imgmsg(display))
+        except Exception as e:
+            rospy.logerr(str(e))
 
 
 if __name__ == '__main__':
-    gr = GestureRecognitionOpenCV(camera_id=0)
-    gr.run()
+    try:
+        GestureRecognitionCV()
+        rospy.spin()
+    except rospy.ROSInterruptException:
+        pass
