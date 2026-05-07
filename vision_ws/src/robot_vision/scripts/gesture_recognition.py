@@ -9,6 +9,7 @@ import numpy as np
 import rospy
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
+from geometry_msgs.msg import Twist
 
 try:
     import mediapipe as mp
@@ -50,6 +51,7 @@ class GestureRecognitionCV:
         self.image_sub = rospy.Subscriber('/usb_cam/image_raw', Image, self.image_callback, queue_size=1)
         self.result_pub = rospy.Publisher(self.result_topic, String, queue_size=10)
         self.image_pub = rospy.Publisher(self.image_topic, Image, queue_size=10)
+        self.cmd_vel_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
 
         self.result_history = deque(maxlen=self.history_len)
         self.last_published = None
@@ -215,6 +217,32 @@ class GestureRecognitionCV:
         if result != self.last_published:
             self.result_pub.publish(result)
             self.last_published = result
+            rospy.loginfo("Gesture changed to %s, sending Twist commands.", result)
+
+        # 每次回调都发布 Twist 确保底层不会因为超时而停车
+        twist = Twist()
+        if result == 'PALM':
+            # 前进，速度降低为原来的一半
+            twist.linear.x = 0.125
+        elif result == 'V_SIGN':
+            # 后退，速度降低为原来的一半
+            twist.linear.x = -0.125
+        elif result == 'POINT':
+            # 识别为 POINT 手势：左转 (正角速度)
+            twist.angular.z = 0.5
+        elif result == 'THREE':
+            # 识别为 THREE 手势：右转 (负角速度)
+            twist.angular.z = -0.5
+        elif result == 'OK' or result == 'NONE':
+            # OK 或者 NONE (没有任何手势) 时：停止并驻车
+            twist.linear.x = 0.0
+            twist.angular.z = 0.0
+        else:
+            # 对于其他所有未定义动作手势，保持停止
+            twist.linear.x = 0.0
+            twist.angular.z = 0.0
+            
+        self.cmd_vel_pub.publish(twist)
 
     def image_callback(self, data):
         try:
